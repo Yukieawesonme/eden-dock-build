@@ -1,0 +1,247 @@
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt	2026-10-15 05:07:13.686130546 +0000
+@@ -188,6 +188,11 @@
+     external fun stopEmulation()
+ 
+     /**
++     * Tells the running guest that the console operation mode (docked/handheld) changed.
++     */
++    external fun notifyOperationModeChanged()
++
++    /**
+      * Returns true if emulation is running (or is paused).
+      */
+     external fun isRunning(): Boolean
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/dialogs/QuickSettings.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/dialogs/QuickSettings.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/dialogs/QuickSettings.kt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/dialogs/QuickSettings.kt	2026-10-15 05:07:48.014065146 +0000
+@@ -17,6 +17,7 @@
+ import com.google.android.material.materialswitch.MaterialSwitch
+ import org.yuzu.yuzu_emu.R
+ import org.yuzu.yuzu_emu.YuzuApplication
++import org.yuzu.yuzu_emu.features.settings.model.AbstractBooleanSetting
+ import org.yuzu.yuzu_emu.features.settings.model.BooleanSetting
+ import org.yuzu.yuzu_emu.features.settings.model.IntSetting
+ import org.yuzu.yuzu_emu.fragments.EmulationFragment
+@@ -134,7 +135,8 @@
+         name: Int,
+ 
+         container: ViewGroup,
+-        setting: BooleanSetting
++        setting: AbstractBooleanSetting,
++        isEnabled: Boolean = true
+     ) {
+         val inflater = LayoutInflater.from(emulationFragment.requireContext())
+         val itemView = inflater.inflate(R.layout.item_quick_settings_menu, container, false)
+@@ -146,6 +148,7 @@
+         titleView.text = YuzuApplication.appContext.getString(name)
+         switchContainer.visibility = View.VISIBLE
+         switchView.isChecked = setting.getBoolean()
++        switchView.isEnabled = isEnabled
+ 
+         switchView.setOnCheckedChangeListener { _, isChecked ->
+             setting.setBoolean(isChecked)
+@@ -153,7 +156,9 @@
+         }
+ 
+         switchContainer.setOnClickListener {
+-            switchView.toggle()
++            if (isEnabled) {
++                switchView.toggle()
++            }
+         }
+         container.addView(itemView)
+     }
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/BooleanSetting.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/BooleanSetting.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/BooleanSetting.kt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/BooleanSetting.kt	2026-10-15 05:07:17.139552900 +0000
+@@ -22,7 +22,6 @@
+     EMULATE_BGR565("emulate_bgr565"),
+     RESCALE_HACK("rescale_hack"),
+     CPUOPT_UNSAFE_HOST_MMU("cpuopt_unsafe_host_mmu"),
+-    USE_DOCKED_MODE("use_docked_mode"),
+     USE_AUTO_STUB("use_auto_stub"),
+     RENDERER_USE_DISK_SHADER_CACHE("use_disk_shader_cache"),
+     RENDERER_FORCE_MAX_CLOCK("force_max_clock"),
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/DockedModeSetting.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/DockedModeSetting.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/DockedModeSetting.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/DockedModeSetting.kt	2026-10-15 05:07:25.722176499 +0000
+@@ -0,0 +1,56 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.features.settings.model
++
++import org.yuzu.yuzu_emu.NativeLibrary
++import org.yuzu.yuzu_emu.features.input.NativeInput
++import org.yuzu.yuzu_emu.features.input.model.NpadStyleIndex
++
++/**
++ * Boolean view of the native Settings::ConsoleMode enum (Handheld = 0, Docked = 1).
++ *
++ * The native setting is a 4 byte enum, so it has to be accessed as an int rather than a bool.
++ */
++object DockedModeSetting : AbstractBooleanSetting {
++    private const val HANDHELD = 0
++    private const val DOCKED = 1
++
++    private val setting = IntSetting.USE_DOCKED_MODE
++
++    override val key = setting.key
++
++    override val defaultValue: Boolean by lazy { setting.defaultValue == DOCKED }
++
++    /**
++     * Docked mode can't be used while player 1 is a handheld controller.
++     */
++    val isAvailable: Boolean
++        get() = NativeInput.getStyleIndex(0) != NpadStyleIndex.Handheld
++
++    override fun getBoolean(needsGlobal: Boolean): Boolean {
++        if (!isAvailable) {
++            return false
++        }
++        return setting.getInt(needsGlobal) == DOCKED
++    }
++
++    override fun setBoolean(value: Boolean) {
++        val wasDocked = setting.getInt(false) == DOCKED
++        setting.setInt(if (value) DOCKED else HANDHELD)
++        if (wasDocked != value) {
++            NativeLibrary.notifyOperationModeChanged()
++        }
++    }
++
++    override fun getValueAsString(needsGlobal: Boolean): String =
++        (setting.getInt(needsGlobal) == DOCKED).toString()
++
++    override fun reset() {
++        val wasDocked = setting.getInt(false) == DOCKED
++        setting.reset()
++        if (wasDocked != (setting.getInt(false) == DOCKED)) {
++            NativeLibrary.notifyOperationModeChanged()
++        }
++    }
++}
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt	2026-10-15 05:07:17.139119887 +0000
+@@ -13,6 +13,7 @@
+     CPU_ACCURACY("cpu_accuracy"),
+     REGION_INDEX("region_index"),
+     LANGUAGE_INDEX("language_index"),
++    USE_DOCKED_MODE("use_docked_mode"),
+     RENDERER_BACKEND("backend"),
+     RENDERER_VRAM_USAGE_MODE("vram_usage_mode"),
+     RENDERER_NVDEC_EMULATION("nvdec_emulation"),
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/view/SettingsItem.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/view/SettingsItem.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/view/SettingsItem.kt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/view/SettingsItem.kt	2026-10-15 05:07:37.080082958 +0000
+@@ -10,12 +10,11 @@
+ import org.yuzu.yuzu_emu.NativeLibrary
+ import org.yuzu.yuzu_emu.R
+ import org.yuzu.yuzu_emu.YuzuApplication
+-import org.yuzu.yuzu_emu.features.input.NativeInput
+-import org.yuzu.yuzu_emu.features.input.model.NpadStyleIndex
+ import org.yuzu.yuzu_emu.features.settings.model.AbstractBooleanSetting
+ import org.yuzu.yuzu_emu.features.settings.model.AbstractSetting
+ import org.yuzu.yuzu_emu.features.settings.model.BooleanSetting
+ import org.yuzu.yuzu_emu.features.settings.model.ByteSetting
++import org.yuzu.yuzu_emu.features.settings.model.DockedModeSetting
+ import org.yuzu.yuzu_emu.features.settings.model.IntSetting
+ import org.yuzu.yuzu_emu.features.settings.model.LongSetting
+ import org.yuzu.yuzu_emu.features.settings.model.ShortSetting
+@@ -58,8 +57,8 @@
+     val isEditable: Boolean
+         get() {
+             // Can't change docked mode toggle when using handheld mode
+-            if (setting.key == BooleanSetting.USE_DOCKED_MODE.key) {
+-                return NativeInput.getStyleIndex(0) != NpadStyleIndex.Handheld
++            if (setting.key == DockedModeSetting.key) {
++                return DockedModeSetting.isAvailable
+             }
+ 
+             // Can't edit enable_qlaunch_button if firmware is not available
+@@ -272,30 +271,9 @@
+                 )
+             )
+ 
+-            val dockedModeSetting = object : AbstractBooleanSetting {
+-                override val key = BooleanSetting.USE_DOCKED_MODE.key
+-
+-                override fun getBoolean(needsGlobal: Boolean): Boolean {
+-                    if (NativeInput.getStyleIndex(0) == NpadStyleIndex.Handheld) {
+-                        return false
+-                    }
+-                    return BooleanSetting.USE_DOCKED_MODE.getBoolean(needsGlobal)
+-                }
+-
+-                override fun setBoolean(value: Boolean) =
+-                    BooleanSetting.USE_DOCKED_MODE.setBoolean(value)
+-
+-                override val defaultValue = BooleanSetting.USE_DOCKED_MODE.defaultValue
+-
+-                override fun getValueAsString(needsGlobal: Boolean): String =
+-                    BooleanSetting.USE_DOCKED_MODE.getValueAsString(needsGlobal)
+-
+-                override fun reset() = BooleanSetting.USE_DOCKED_MODE.reset()
+-            }
+-
+             put(
+                 SwitchSetting(
+-                    dockedModeSetting,
++                    DockedModeSetting,
+                     titleId = R.string.use_docked_mode,
+                     descriptionId = R.string.use_docked_mode_description
+                 )
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt	2026-10-15 05:07:40.295832840 +0000
+@@ -500,7 +500,7 @@
+             add(ShortSetting.RENDERER_SPEED_LIMIT.key)
+             add(ShortSetting.RENDERER_TURBO_SPEED_LIMIT.key)
+             add(ShortSetting.RENDERER_SLOW_SPEED_LIMIT.key)
+-            add(BooleanSetting.USE_DOCKED_MODE.key)
++            add(IntSetting.USE_DOCKED_MODE.key)
+             add(IntSetting.REGION_INDEX.key)
+             add(IntSetting.LANGUAGE_INDEX.key)
+             add(BooleanSetting.USE_CUSTOM_RTC.key)
+diff -ruN a/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt	2026-10-15 05:07:55.501901284 +0000
+@@ -74,6 +74,7 @@
+ import org.yuzu.yuzu_emu.dialogs.QuickSettings
+ import org.yuzu.yuzu_emu.features.input.NativeInput
+ import org.yuzu.yuzu_emu.features.settings.model.BooleanSetting
++import org.yuzu.yuzu_emu.features.settings.model.DockedModeSetting
+ import org.yuzu.yuzu_emu.features.settings.model.IntSetting
+ import org.yuzu.yuzu_emu.features.settings.model.Settings
+ import org.yuzu.yuzu_emu.features.settings.model.Settings.EmulationOrientation
+@@ -1184,7 +1185,8 @@
+             quickSettings.addBooleanSetting(
+                 R.string.use_docked_mode,
+                 container,
+-                BooleanSetting.USE_DOCKED_MODE,
++                DockedModeSetting,
++                DockedModeSetting.isAvailable
+             )
+ 
+             quickSettings.addDivider(container)
+diff -ruN a/src/android/app/src/main/jni/native.cpp b/src/android/app/src/main/jni/native.cpp
+--- a/src/android/app/src/main/jni/native.cpp	2026-10-14 19:24:58.000000000 +0000
++++ b/src/android/app/src/main/jni/native.cpp	2026-10-15 05:07:07.407378983 +0000
+@@ -938,6 +938,13 @@
+     EmulationSession::GetInstance().HaltEmulation();
+ }
+ 
++void Java_org_yuzu_yuzu_1emu_NativeLibrary_notifyOperationModeChanged(JNIEnv* env, jclass clazz) {
++    auto& system = EmulationSession::GetInstance().System();
++    if (system.IsPoweredOn()) {
++        system.GetAppletManager().OperationModeChanged();
++    }
++}
++
+ jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_isRunning(JNIEnv* env, jclass clazz) {
+     return static_cast<jboolean>(EmulationSession::GetInstance().IsRunning());
+ }
