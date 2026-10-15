@@ -1,0 +1,57 @@
+name: Build Eden Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "standard = Android 13 ou mais novo | legacy = Android 10 a 12"
+        type: choice
+        options:
+          - standard
+          - legacy
+        default: standard
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - name: Pegar o patch deste repositorio
+        uses: actions/checkout@v4
+
+      - name: Baixar o codigo oficial do Eden
+        run: |
+          git clone --recursive https://git.eden-emu.dev/eden-emu/eden.git eden \
+            || git clone --recursive https://codeberg.org/eden-emu/eden.git eden
+
+      - name: Aplicar a correcao do dock
+        working-directory: eden
+        run: |
+          patch -p1 --dry-run < ../android-dock-mode-fix.patch
+          patch -p1 < ../android-dock-mode-fix.patch
+
+      - name: Liberar espaco em disco
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Instalar NDK e CMake do Android
+        run: |
+          sudo chown -R "$USER" "$ANDROID_HOME"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "ndk;28.2.13676358" "cmake;3.22.1" "platforms;android-36"
+
+      - name: Compilar
+        working-directory: eden
+        run: sh ./.ci/android/build.sh -t "${{ inputs.target }}" -b RelWithDebInfo
+
+      - name: Guardar o APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: eden-android-apk
+          path: eden/artifacts/*.apk
