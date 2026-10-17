@@ -1,0 +1,154 @@
+diff -ruN a/src/shader_recompiler/CMakeLists.txt b/src/shader_recompiler/CMakeLists.txt
+--- a/src/shader_recompiler/CMakeLists.txt	2026-10-14 19:24:58.000000000 +0000
++++ b/src/shader_recompiler/CMakeLists.txt	2026-10-17 05:59:11.500681953 +0000
+@@ -140,6 +140,7 @@
+     frontend/maxwell/translate/impl/move_special_register.cpp
+     frontend/maxwell/translate/impl/not_implemented.cpp
+     frontend/maxwell/translate/impl/output_geometry.cpp
++    frontend/maxwell/translate/impl/permute_register_pair.cpp
+     frontend/maxwell/translate/impl/pixel_load.cpp
+     frontend/maxwell/translate/impl/predicate_set_predicate.cpp
+     frontend/maxwell/translate/impl/predicate_set_register.cpp
+diff -ruN a/src/shader_recompiler/frontend/maxwell/translate/impl/not_implemented.cpp b/src/shader_recompiler/frontend/maxwell/translate/impl/not_implemented.cpp
+--- a/src/shader_recompiler/frontend/maxwell/translate/impl/not_implemented.cpp	2026-10-14 19:24:58.000000000 +0000
++++ b/src/shader_recompiler/frontend/maxwell/translate/impl/not_implemented.cpp	2026-10-17 05:59:11.500098447 +0000
+@@ -195,22 +195,6 @@
+     ThrowNotImplemented(Opcode::PRET);
+ }
+ 
+-void TranslatorVisitor::PRMT_reg(u64) {
+-    ThrowNotImplemented(Opcode::PRMT_reg);
+-}
+-
+-void TranslatorVisitor::PRMT_rc(u64) {
+-    ThrowNotImplemented(Opcode::PRMT_rc);
+-}
+-
+-void TranslatorVisitor::PRMT_cr(u64) {
+-    ThrowNotImplemented(Opcode::PRMT_cr);
+-}
+-
+-void TranslatorVisitor::PRMT_imm(u64) {
+-    ThrowNotImplemented(Opcode::PRMT_imm);
+-}
+-
+ void TranslatorVisitor::R2B(u64) {
+     ThrowNotImplemented(Opcode::R2B);
+ }
+diff -ruN a/src/shader_recompiler/frontend/maxwell/translate/impl/permute_register_pair.cpp b/src/shader_recompiler/frontend/maxwell/translate/impl/permute_register_pair.cpp
+--- a/src/shader_recompiler/frontend/maxwell/translate/impl/permute_register_pair.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b/src/shader_recompiler/frontend/maxwell/translate/impl/permute_register_pair.cpp	2026-10-17 05:59:00.459678694 +0000
+@@ -0,0 +1,113 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include "common/bit_field.h"
++#include "common/common_types.h"
++#include "shader_recompiler/exception.h"
++#include "shader_recompiler/frontend/maxwell/translate/impl/impl.h"
++
++namespace Shader::Maxwell {
++namespace {
++enum class PermuteMode : u64 {
++    Default,
++    F4E,
++    B4E,
++    RC8,
++    ECL,
++    ECR,
++    RC16,
++};
++
++// Returns the 4-bit selector for destination byte `index`.
++// The default mode reads one nibble per byte from the selector. The other modes derive all four
++// nibbles from the two lowest bits of the selector.
++IR::U32 ByteSelector(IR::IREmitter& ir, PermuteMode mode, const IR::U32& selector, u32 index) {
++    const IR::U32 position{ir.BitwiseAnd(selector, ir.Imm32(3U))};
++    switch (mode) {
++    case PermuteMode::Default:
++        return ir.BitFieldExtract(selector, ir.Imm32(index * 4), ir.Imm32(4U), false);
++    case PermuteMode::F4E:
++        return ir.IAdd(position, ir.Imm32(index));
++    case PermuteMode::B4E:
++        return ir.IAdd(ir.Imm32(4U),
++                       ir.BitwiseAnd(ir.IAdd(position, ir.Imm32(4U - index)), ir.Imm32(3U)));
++    case PermuteMode::RC8:
++        return position;
++    case PermuteMode::ECL:
++        return ir.UMax(position, ir.Imm32(index));
++    case PermuteMode::ECR:
++        return ir.UMin(position, ir.Imm32(index));
++    case PermuteMode::RC16:
++        return ir.BitwiseOr(ir.Imm32(index & 1U),
++                            ir.ShiftLeftLogical(ir.BitwiseAnd(selector, ir.Imm32(1U)),
++                                                ir.Imm32(1U)));
++    }
++    throw NotImplementedException("PRMT mode {}", static_cast<u64>(mode));
++}
++
++// Reads the byte chosen by the lowest three bits of `nibble` out of the 64-bit value {high, low}.
++// When `use_sign` is set, bit 3 of the nibble replicates the sign bit of the byte instead.
++IR::U32 ExtractByte(IR::IREmitter& ir, const IR::U32& low, const IR::U32& high,
++                    const IR::U32& nibble, bool use_sign) {
++    const IR::U32 index{ir.BitwiseAnd(nibble, ir.Imm32(7U))};
++    const IR::U1 from_high{ir.IGreaterThanEqual(index, ir.Imm32(4U), false)};
++    const IR::U32 word{ir.Select(from_high, high, low)};
++    const IR::U32 bit_offset{
++        ir.ShiftLeftLogical(ir.BitwiseAnd(index, ir.Imm32(3U)), ir.Imm32(3U))};
++    IR::U32 value{ir.BitFieldExtract(word, bit_offset, ir.Imm32(8U), false)};
++    if (use_sign) {
++        const IR::U32 zero{ir.Imm32(0U)};
++        const IR::U32 sign{ir.BitFieldExtract(value, ir.Imm32(7U), ir.Imm32(1U), false)};
++        const IR::U32 replicated{ir.IMul(sign, ir.Imm32(0xFFU))};
++        const IR::U32 replicate_flag{
++            ir.BitFieldExtract(nibble, ir.Imm32(3U), ir.Imm32(1U), false)};
++        const IR::U1 replicate{ir.INotEqual(replicate_flag, zero)};
++        value = IR::U32{ir.Select(replicate, replicated, value)};
++    }
++    return value;
++}
++
++// PRMT Rd, Ra, selector, high
++// The low four source bytes come from Ra and the high four source bytes from `src_high`.
++void PRMT(TranslatorVisitor& v, u64 insn, const IR::U32& selector, const IR::U32& src_high) {
++    union {
++        u64 raw;
++        BitField<0, 8, IR::Reg> dest_reg;
++        BitField<8, 8, IR::Reg> src_a_reg;
++        BitField<48, 3, PermuteMode> mode;
++    } const prmt{insn};
++
++    const PermuteMode mode{prmt.mode.Value()};
++    if (static_cast<u64>(mode) > static_cast<u64>(PermuteMode::RC16)) {
++        throw NotImplementedException("PRMT mode {}", static_cast<u64>(mode));
++    }
++    const IR::U32 src_low{v.X(prmt.src_a_reg)};
++
++    IR::U32 result{v.ir.Imm32(0U)};
++    for (u32 i = 0; i < 4; ++i) {
++        const IR::U32 nibble{ByteSelector(v.ir, mode, selector, i)};
++        const bool use_sign{mode == PermuteMode::Default};
++        const IR::U32 byte{ExtractByte(v.ir, src_low, src_high, nibble, use_sign)};
++        result = v.ir.BitFieldInsert(result, byte, v.ir.Imm32(i * 8), v.ir.Imm32(8U));
++    }
++    v.X(prmt.dest_reg, result);
++}
++} // Anonymous namespace
++
++void TranslatorVisitor::PRMT_reg(u64 insn) {
++    PRMT(*this, insn, GetReg20(insn), GetReg39(insn));
++}
++
++void TranslatorVisitor::PRMT_rc(u64 insn) {
++    PRMT(*this, insn, GetReg39(insn), GetCbuf(insn));
++}
++
++void TranslatorVisitor::PRMT_cr(u64 insn) {
++    PRMT(*this, insn, GetCbuf(insn), GetReg39(insn));
++}
++
++void TranslatorVisitor::PRMT_imm(u64 insn) {
++    PRMT(*this, insn, GetImm20(insn), GetReg39(insn));
++}
++
++} // namespace Shader::Maxwell
