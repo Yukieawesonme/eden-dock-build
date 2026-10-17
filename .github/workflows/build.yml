@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     steps:
-      - name: Pegar o patch deste repositorio
+      - name: Pegar os patches deste repositorio
         uses: actions/checkout@v4
 
       - name: Baixar o codigo oficial do Eden
@@ -24,11 +24,14 @@ jobs:
           git clone --recursive https://git.eden-emu.dev/eden-emu/eden.git eden \
             || git clone --recursive https://codeberg.org/eden-emu/eden.git eden
 
-      - name: Aplicar a correcao do dock
+      - name: Aplicar as correcoes
         working-directory: eden
         run: |
-          patch -p1 --dry-run < ../android-dock-mode-fix.patch
-          patch -p1 < ../android-dock-mode-fix.patch
+          for p in ../*.patch; do
+            echo "Aplicando $p"
+            patch -p1 --dry-run < "$p"
+            patch -p1 < "$p"
+          done
 
       - name: Liberar espaco em disco
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
